@@ -797,6 +797,7 @@ h2{font:700 14.5px/1.2 var(--f-cond);color:var(--ink-2);margin:22px 0 2px;letter
 .btn{all:unset;box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;padding:8px 13px;border-radius:9px;background:var(--ink);color:var(--panel);font:600 13.5px var(--f-body);cursor:pointer}
 .btn:hover{opacity:.88}.btn:focus-visible{outline:2px solid var(--ink);outline-offset:2px}.btn[disabled]{opacity:.45;cursor:default}
 .btn.ghost{background:transparent;color:var(--ink);box-shadow:inset 0 0 0 1px var(--rule)}.btn.draw{margin-top:10px}
+.exp{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0 2px}
 .store-note{margin:8px 0 0;font-size:12px;color:var(--ink-3)}
 .fld{display:grid;gap:3px;margin:0 0 8px;font-size:12px;color:var(--ink-2)}
 .fld input,.sn-in{font:inherit;font-size:13.5px;color:var(--ink);background:var(--panel);border:1px solid var(--rule);border-radius:7px;padding:6px 8px;min-width:0}
@@ -875,6 +876,7 @@ h1{font-size:27px}
 <label class="chk"><input type="checkbox" id="t-names" checked> Station names</label>
 <label class="chk"><input type="checkbox" id="t-places" checked> Street, neighbourhood and park names</label>
 <label class="chk"><input type="checkbox" id="t-ego"> EGO’s original graphic on top, for comparison</label>
+	<div class="exp"><button type="button" class="btn" id="exp-png">Save as PNG</button><button type="button" class="btn ghost" id="exp-pdf">Save as PDF</button></div>
 </section>
 <details class="about"><summary>About this map</summary>
 <h3>Where the facts come from</h3>
@@ -1599,7 +1601,140 @@ function drawInit() {
   panel.addEventListener('focusout', function () { setTimeout(function () { var a = document.activeElement; if (needRows && !(a && a.tagName === 'INPUT' && panel.contains(a))) { needRows = false; renderRows(); } }, 0); });
   storeInit();
 }
-
+/* ===== Save the current map view as PNG or PDF ===== */
+function renderMap(S) {
+  var sz = map.getSize(), W = sz.x, H = sz.y, ink = css('--ink'), land = css('--land'), fb = css('--f-body'), fc = css('--f-cond');
+  var m = document.createElement('canvas').getContext('2d'), items = [], rows = 1, lx = 16;
+  LINES.forEach(function (l) {                      // legend layout for the footer
+    if (!vis[l.id] || !LL[l.id]) return;
+    m.font = '700 11px ' + fc; var bw = m.measureText(l.code).width + 12;
+    var t = l.g === 'us' ? l.name + (l.km ? ', ' + l.km + ' km' : '') : '';
+    m.font = '500 11.5px ' + fb; var tw = t ? m.measureText(t).width + 6 : 0;
+    if (lx + bw + tw > W - 16 && lx > 16) { rows++; lx = 16; }
+    items.push({ l: l, t: t, bw: bw, x: lx, row: rows - 1 }); lx += bw + tw + 10;
+  });
+  var FH = 60 + rows * 24, cv = document.createElement('canvas');
+  cv.width = Math.round(W * S); cv.height = Math.round((H + FH) * S);
+  var c = cv.getContext('2d'); c.scale(S, S);
+  var P = function (ll) { return map.latLngToContainerPoint(ll); };
+  var ls = function (v) { if ('letterSpacing' in c) c.letterSpacing = v; };
+  function trace(lines, close) { c.beginPath(); lines.forEach(function (r) { r.forEach(function (ll, i) { var p = P(ll); if (i) c.lineTo(p.x, p.y); else c.moveTo(p.x, p.y); }); if (close) c.closePath(); }); }
+  function strokeAs(o) {
+    c.globalAlpha = o.opacity == null ? 1 : o.opacity; c.strokeStyle = o.color; c.lineWidth = o.weight; c.lineCap = o.lineCap || 'round'; c.lineJoin = 'round';
+    c.setLineDash(o.dashArray ? String(o.dashArray).split(/[\s,]+/).map(Number) : []); c.stroke(); c.globalAlpha = 1; c.setLineDash([]);
+  }
+  function text(t, x, y, font, fill, halo, hw) { c.font = font; c.lineJoin = 'round'; if (halo) { c.strokeStyle = halo; c.lineWidth = hw || 3; c.strokeText(t, x, y); } c.fillStyle = fill; c.fillText(t, x, y); }
+  c.save(); c.beginPath(); c.rect(0, 0, W, H); c.clip();
+  // basemap
+  c.fillStyle = land; c.fillRect(0, 0, W, H);
+  c.fillStyle = css('--hosp'); (D.hosp || []).forEach(function (h) { trace(h.r, true); c.fill(); });
+  D.districts.forEach(function (d) { trace(d.r, true); strokeAs({ color: css('--district'), weight: 1.1, dashArray: '5 6' }); });
+  ['p', 't', 'm'].forEach(function (k) { if (cases[k]) { trace(D.roads[k]); strokeAs(cases[k].options); } });
+  ['s', 'p', 't', 'm'].forEach(function (k) { trace(D.roads[k]); strokeAs(roads[k].options); });
+  if (map.hasLayer(poiL)) poiL.eachLayer(function (q) { var p = P(q.getLatLng()); if (p.x < -5 || p.y < -5 || p.x > W + 5 || p.y > H + 5) return; c.beginPath(); c.arc(p.x, p.y, q.getRadius(), 0, 7); c.fillStyle = q.options.fillColor; c.fill(); });
+  if (ego && map.hasLayer(ego) && ego.getElement()) { var eb = ego.getBounds(), e1 = P(eb.getNorthWest()), e2 = P(eb.getSouthEast()); c.globalAlpha = ego.options.opacity; c.drawImage(ego.getElement(), e1.x, e1.y, e2.x - e1.x, e2.y - e1.y); c.globalAlpha = 1; }
+  // rail lines, in the map's drawing order, then your lines on top
+  ['BR', 'A1X', 'M6', 'M5', 'M4X', 'M2X', 'A2', 'A1', 'M3', 'M2', 'M1', 'M4'].concat(LINES.filter(function (l) { return l.g === 'us'; }).map(function (l) { return l.id; })).forEach(function (id) {
+    if (!vis[id] || !LL[id]) return; trace(BY[id].geom); strokeAs(LL[id].casing.options); strokeAs(LL[id].main.options);
+  });
+  // street, neighbourhood, park and hospital names as currently placed
+  Object.keys(smk).forEach(function (k) {
+    var t = k[0], i = +k.slice(1); c.textAlign = 'center'; c.textBaseline = 'middle';
+    if (t === 's') {
+      var a = SA[i], p = P([a[0], a[1]]); c.save(); c.translate(p.x, p.y); c.rotate(a[2] * Math.PI / 180);
+      text(SN[a[5]], 0, 0, (a[4] === 0 ? '600 12px ' : a[4] === 1 ? '500 11.5px ' : '500 11px ') + fb, css('--street-ink'), css('--road'), 3); c.restore(); return;
+    }
+    var q = t === 'h' ? HO[i] : t === 'H' ? HS[i] : PO[i], p2 = P(q.l || [q[0], q[1]]);
+    ls(t === 'h' ? '0.8px' : '0px');
+    text(q.n || q[2], p2.x, p2.y, t === 'h' ? '600 11px ' + fc : 'italic 500 11px ' + fb, css(t === 'h' ? '--hood-ink' : t === 'H' ? '--hosp-ink' : t === 'p' ? '--poi-ink' : '--ink-3'), land, 3);
+    ls('0px');
+  });
+  // stations
+  SL.forEach(function (s) {
+    if (!map.hasLayer(s.mk)) return; var o = s.mk.options, p = P(s.ll);
+    c.beginPath(); c.arc(p.x, p.y, s.mk.getRadius(), 0, 7);
+    c.globalAlpha = o.fillOpacity; c.fillStyle = o.fillColor; c.fill(); c.globalAlpha = o.opacity; c.lineWidth = o.weight; c.strokeStyle = o.color; c.stroke(); c.globalAlpha = 1;
+  });
+  // district and station names
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  if (!map.getContainer().classList.contains('zhi')) D.districts.forEach(function (d) { if (!d.l) return; var p = P(d.l); ls('0.9px'); text(d.n, p.x, p.y, '600 15px ' + fc, css('--district-label')); ls('0px'); });
+  c.textAlign = 'left';
+  SL.forEach(function (s) {
+    if (!s.placed || !labG.hasLayer(s.lab)) return; var p = P(s.ll), h = s.major ? 17 : 15;
+    text(s.n, p.x + s.dx, p.y + s.dy + h / 2, (s.op ? '' : 'italic ') + (s.major ? '650 13px ' : '500 12px ') + fc, s.op ? ink : css('--ink-2'), land, 4);
+  });
+  // airport landmark
+  if (typeof AIR !== 'undefined') {
+    var ap = P(AIR); c.beginPath(); c.arc(ap.x, ap.y, 11, 0, 7); c.fillStyle = ink; c.fill();
+    c.save(); c.translate(ap.x - 7, ap.y - 7); c.scale(14 / 24, 14 / 24); c.fillStyle = css('--panel');
+    c.fill(new Path2D('M21 16v-2l-8-5V3.5c0-.83-.67-1.5-1.5-1.5S10 2.67 10 3.5V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5l8 2.5z')); c.restore();
+    c.textAlign = 'right'; text('Esenboğa Airport', ap.x - 17, ap.y, '700 12.5px ' + fc, ink, land, 4); c.textAlign = 'left';
+  }
+  // scale bar
+  var mpp = 40075016.686 * Math.cos(map.getCenter().lat * Math.PI / 180) / (256 * Math.pow(2, map.getZoom())), len = 50;
+  [100, 200, 500, 1000, 2000, 5000, 10000, 20000].forEach(function (v) { if (v / mpp <= 140) len = v; });
+  var sy = H - 16, sw = len / mpp;
+  c.strokeStyle = ink; c.lineWidth = 2; c.lineCap = 'butt'; c.beginPath(); c.moveTo(16, sy - 6); c.lineTo(16, sy); c.lineTo(16 + sw, sy); c.lineTo(16 + sw, sy - 6); c.stroke();
+  c.textBaseline = 'alphabetic'; text(len >= 1000 ? len / 1000 + ' km' : len + ' m', 20, sy - 6, '600 11px ' + fc, ink, land, 3);
+  c.restore();
+  // footer: title, credits, legend of the lines shown
+  c.fillStyle = css('--panel'); c.fillRect(0, H, W, FH); c.fillStyle = css('--rule'); c.fillRect(0, H, W, 1);
+  c.textAlign = 'left'; c.textBaseline = 'alphabetic';
+  text('Ankara rail network', 16, H + 25, '700 17px ' + fc, ink);
+  text('Saved ' + new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }) + '. Lines from EGO; positions approximate. Roads © OpenStreetMap contributors.', 16, H + 43, '500 11px ' + fb, css('--ink-2'));
+  items.forEach(function (it) {
+    var y = H + 54 + it.row * 24, col = css('--c-' + it.l.col), dash = it.l.g === 'pl' || it.l.g === 'us';
+    c.beginPath(); if (c.roundRect) c.roundRect(it.x, y, it.bw, 18, 5); else c.rect(it.x, y, it.bw, 18);
+    if (dash) { c.setLineDash([3, 2]); c.lineWidth = 1.5; c.strokeStyle = col; c.stroke(); c.setLineDash([]); } else { c.fillStyle = col; c.fill(); }
+    c.textBaseline = 'middle'; c.textAlign = 'center'; text(it.l.code, it.x + it.bw / 2, y + 9.5, '700 11px ' + fc, dash ? col : '#fff');
+    if (it.t) { c.textAlign = 'left'; text(it.t, it.x + it.bw + 6, y + 9.5, '500 11.5px ' + fb, ink); }
+  });
+  return cv;
+}
+function jpegToPdf(jpg, iw, ih) {                    // one A4 page, image fitted with a margin
+  var wide = iw >= ih, PW = wide ? 842 : 595, PH = wide ? 595 : 842, mg = 24;
+  var s = Math.min((PW - 2 * mg) / iw, (PH - 2 * mg) / ih), w = iw * s, h = ih * s, x = (PW - w) / 2, y = (PH - h) / 2;
+  var enc = new TextEncoder(), parts = [], offs = [], len = 0;
+  function add(v) { var b = typeof v === 'string' ? enc.encode(v) : v; parts.push(b); len += b.length; }
+  function obj(n, body) { offs[n] = len; add(n + ' 0 obj\n' + body + '\nendobj\n'); }
+  add('%PDF-1.4\n');
+  obj(1, '<< /Type /Catalog /Pages 2 0 R >>');
+  obj(2, '<< /Type /Pages /Kids [3 0 R] /Count 1 >>');
+  obj(3, '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ' + PW + ' ' + PH + '] /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>');
+  offs[4] = len; add('4 0 obj\n<< /Type /XObject /Subtype /Image /Width ' + iw + ' /Height ' + ih + ' /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ' + jpg.length + ' >>\nstream\n'); add(jpg); add('\nendstream\nendobj\n');
+  var cs = 'q ' + w.toFixed(2) + ' 0 0 ' + h.toFixed(2) + ' ' + x.toFixed(2) + ' ' + y.toFixed(2) + ' cm /Im0 Do Q';
+  obj(5, '<< /Length ' + cs.length + ' >>\nstream\n' + cs + '\nendstream');
+  var xref = len, t = 'xref\n0 6\n0000000000 65535 f \n';
+  for (var i = 1; i <= 5; i++) t += ('000000000' + offs[i]).slice(-10) + ' 00000 n \n';
+  add(t + 'trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n' + xref + '\n%%EOF\n');
+  return new Blob(parts, { type: 'application/pdf' });
+}
+function saveFile(name, blob) {
+  var cl = window.claude;
+  if (!cl || typeof cl.use !== 'function') {        // outside claude.ai: an ordinary browser download
+    var u = URL.createObjectURL(blob), a = document.createElement('a');
+    a.href = u; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(u); }, 5000); return Promise.resolve();
+  }
+  return cl.use('downloads').then(function (dl) {
+    if (!dl) { toast('Saving files isn’t switched on for this map'); return; }
+    return dl.save({ filename: name, data: blob });
+  }).catch(function (e) { if (!e || e.code !== 'declined') toast('The file couldn’t be saved'); });
+}
+function exportMap(kind, btn) {
+  if (!map) return;
+  var label = btn.textContent, done = function () { btn.disabled = false; btn.textContent = label; };
+  btn.disabled = true; btn.textContent = 'Preparing…';
+  (document.fonts ? document.fonts.ready : Promise.resolve()).then(function () {
+    var cv = renderMap(2), name = 'ankara-rail-map-' + new Date().toISOString().slice(0, 10) + '.' + kind;
+    cv.toBlob(function (blob) {
+      if (!blob) { toast('The image couldn’t be created'); done(); return; }
+      if (kind === 'png') { saveFile(name, blob).then(done, done); return; }
+      blob.arrayBuffer().then(function (buf) { return saveFile(name, jpegToPdf(new Uint8Array(buf), cv.width, cv.height)); }).then(done, done);
+    }, kind === 'png' ? 'image/png' : 'image/jpeg', 0.92);
+  }).catch(function () { toast('The map couldn’t be saved'); done(); });
+}
+['png', 'pdf'].forEach(function (k) { var b = $('#exp-' + k); if (b) b.addEventListener('click', function () { exportMap(k, b); }); });
 document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && sel) clearSel(); });
 ruler(); renderRows(); syncFilter();
 if (!$('#t-ego') || !D.ego) { var eg = $('#t-ego'); if (eg) eg.closest('label').hidden = true; }
